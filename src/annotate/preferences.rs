@@ -448,13 +448,14 @@ pub fn open(gb: &Rc<Omacapture>) {
     let g_install = adw::PreferencesGroup::new();
     g_install.set_title("Install keybindings");
     g_install.set_description(Some("Adds a marked block to ~/.config/hypr/bindings.lua and reloads Hyprland. Nothing is written until you click Install; Remove takes exactly that block out again."));
+    let initial_preset = crate::keybinds::remembered_preset();
     let preset_row = combo_row(
         "Preset",
         &[
             "Super+I (area), Super+Shift+I (annotate)",
             "Print (replaces Omarchy's screenshot key), Shift+Print, Ctrl+Print, Super+Ctrl+Print",
         ],
-        0,
+        crate::keybinds::combo_index(initial_preset),
         |_| {},
     );
     g_install.add(&preset_row);
@@ -464,7 +465,7 @@ pub fn open(gb: &Rc<Omacapture>) {
         let status_row = status_row.clone();
         let preset_row = preset_row.clone();
         Rc::new(move || {
-            let preset = if preset_row.selected() == 1 { crate::keybinds::Preset::Print } else { crate::keybinds::Preset::SuperI };
+            let preset = crate::keybinds::preset_from_combo(preset_row.selected());
             let file = crate::keybinds::bindings_file();
             let installed = crate::keybinds::is_installed(&file);
             let taken = crate::keybinds::conflicts(preset);
@@ -476,10 +477,6 @@ pub fn open(gb: &Rc<Omacapture>) {
         })
     };
     refresh_status();
-    {
-        let r = refresh_status.clone();
-        preset_row.connect_selected_notify(move |_| r());
-    }
     let install_btn = gtk::Button::with_label("Install");
     install_btn.add_css_class("suggested-action");
     install_btn.set_valign(gtk::Align::Center);
@@ -490,12 +487,15 @@ pub fn open(gb: &Rc<Omacapture>) {
         let r = refresh_status.clone();
         let win = win.clone();
         install_btn.connect_clicked(move |_| {
-            let preset = if preset_row.selected() == 1 { crate::keybinds::Preset::Print } else { crate::keybinds::Preset::SuperI };
+            let preset = crate::keybinds::preset_from_combo(preset_row.selected());
             let taken = crate::keybinds::conflicts(preset);
             let file = crate::keybinds::bindings_file();
             let r2 = r.clone();
             let do_install = move || match crate::keybinds::install(preset, &file, true) {
-                Ok(_) => r2(),
+                Ok(_) => {
+                    crate::keybinds::remember_preset(Some(preset));
+                    r2();
+                }
                 Err(e) => tracing::error!("keybinds install failed: {e}"),
             };
             if taken.is_empty() || preset == crate::keybinds::Preset::Print {
@@ -519,8 +519,10 @@ pub fn open(gb: &Rc<Omacapture>) {
     {
         let r = refresh_status.clone();
         remove_btn.connect_clicked(move |_| {
-            if let Err(e) = crate::keybinds::remove(&crate::keybinds::bindings_file(), true) {
-                tracing::error!("keybinds remove failed: {e}");
+            match crate::keybinds::remove(&crate::keybinds::bindings_file(), true) {
+                Ok(true) => crate::keybinds::remember_preset(None),
+                Ok(false) => {}
+                Err(e) => tracing::error!("keybinds remove failed: {e}"),
             }
             r();
         });
@@ -535,11 +537,10 @@ pub fn open(gb: &Rc<Omacapture>) {
     g_keys.set_description(Some("Global shortcuts belong to Hyprland. Paste this into ~/.config/hypr/bindings.lua; it reloads on save."));
     let exe = std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "omacapture".into());
     let _ = exe;
-    let snippet = format!("{}\n", crate::keybinds::block(crate::keybinds::Preset::SuperI));
     let view = gtk::TextView::new();
     view.set_editable(false);
     view.set_monospace(true);
-    view.buffer().set_text(&snippet);
+    view.buffer().set_text(&(crate::keybinds::block(initial_preset) + "\n"));
     view.set_margin_top(8);
     view.set_margin_bottom(8);
     view.set_margin_start(8);
@@ -551,9 +552,20 @@ pub fn open(gb: &Rc<Omacapture>) {
     copy.set_halign(gtk::Align::Start);
     copy.set_margin_top(8);
     {
-        let snippet = snippet.clone();
+        let r = refresh_status.clone();
+        let view_for_combo = view.clone();
+        preset_row.connect_selected_notify(move |row| {
+            let preset = crate::keybinds::preset_from_combo(row.selected());
+            view_for_combo.buffer().set_text(&(crate::keybinds::block(preset) + "\n"));
+            r();
+        });
+    }
+    {
+        let view = view.clone();
         copy.connect_clicked(move |_| {
-            let _ = crate::clipboard::copy_text(&snippet);
+            let buf = view.buffer();
+            let text = buf.text(&buf.start_iter(), &buf.end_iter(), false);
+            let _ = crate::clipboard::copy_text(&text);
         });
     }
     g_keys.add(&copy);

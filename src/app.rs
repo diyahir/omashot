@@ -87,6 +87,11 @@ pub fn dispatch(gb: &Rc<Omacapture>, cmd: Command) {
     match cmd {
         Command::Daemon => {
             *gb._hold.borrow_mut() = Some(gb.app.hold());
+            match crate::keybinds::restore_from_config(true) {
+                Ok(true) => tracing::info!("restored saved Hyprland keybind preset"),
+                Ok(false) => {}
+                Err(e) => tracing::warn!("keybinds restore: {e}"),
+            }
             tracing::info!("daemon running");
         }
         Command::Full => capture_fullscreen(gb),

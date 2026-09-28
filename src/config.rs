@@ -308,6 +308,19 @@ pub struct Mcp {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Keybinds {
+    /// Last successfully installed Hyprland preset: "print" or "super-i".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+}
+
+impl Keybinds {
+    fn is_unset(&self) -> bool {
+        self.preset.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
     pub general: General,
@@ -317,6 +330,8 @@ pub struct Config {
     pub history: History,
     pub ocr: Ocr,
     pub mcp: Mcp,
+    #[serde(default, skip_serializing_if = "Keybinds::is_unset")]
+    pub keybinds: Keybinds,
 }
 
 impl Config {

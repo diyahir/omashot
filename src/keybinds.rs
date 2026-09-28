@@ -103,6 +103,99 @@ pub fn is_installed(file: &Path) -> bool {
     std::fs::read_to_string(file).map(|t| t.contains(BEGIN)).unwrap_or(false)
 }
 
+impl Preset {
+    pub fn config_name(self) -> &'static str {
+        match self {
+            Preset::SuperI => "super-i",
+            Preset::Print => "print",
+        }
+    }
+
+    pub fn from_config_name(name: &str) -> Option<Self> {
+        match name.trim() {
+            "super-i" => Some(Preset::SuperI),
+            "print" => Some(Preset::Print),
+            _ => None,
+        }
+    }
+}
+
+fn managed_block(text: &str) -> Option<&str> {
+    let start = text.find(BEGIN)?;
+    let rest = &text[start..];
+    let end_rel = rest.find(END)?;
+    Some(&rest[..end_rel + END.len()])
+}
+
+/// Which preset the managed block currently encodes, if any.
+pub fn detect_preset(file: &Path) -> Option<Preset> {
+    let text = std::fs::read_to_string(file).ok()?;
+    let block = managed_block(&text)?;
+    if block.contains("o.bind(\"PRINT\"") {
+        Some(Preset::Print)
+    } else if block.contains("SUPER + I") {
+        Some(Preset::SuperI)
+    } else {
+        None
+    }
+}
+
+/// Re-apply `preset` when the managed block is missing or a different preset.
+/// Returns whether the file was rewritten. Does nothing when `preset` is `None`.
+pub fn restore(file: &Path, preset: Option<Preset>, reload: bool) -> Result<bool> {
+    let Some(preset) = preset else {
+        return Ok(false);
+    };
+    if detect_preset(file) == Some(preset) {
+        return Ok(false);
+    }
+    install(preset, file, reload)?;
+    Ok(true)
+}
+
+pub fn preset_from_combo(selected: u32) -> Preset {
+    if selected == 1 {
+        Preset::Print
+    } else {
+        Preset::SuperI
+    }
+}
+
+pub fn combo_index(preset: Preset) -> u32 {
+    match preset {
+        Preset::Print => 1,
+        Preset::SuperI => 0,
+    }
+}
+
+/// On-disk block first, then config.toml, then Super+I.
+pub fn remembered_preset() -> Preset {
+    detect_preset(&bindings_file()).or_else(saved_preset).unwrap_or(Preset::SuperI)
+}
+
+pub fn restore_from_config(reload: bool) -> Result<bool> {
+    let saved = saved_preset().or_else(|| {
+        let detected = detect_preset(&bindings_file());
+        if let Some(preset) = detected {
+            remember_preset(Some(preset));
+        }
+        detected
+    });
+    restore(&bindings_file(), saved, reload)
+}
+
+pub fn saved_preset() -> Option<Preset> {
+    crate::config::Config::load().keybinds.preset.as_deref().and_then(Preset::from_config_name)
+}
+
+pub fn remember_preset(preset: Option<Preset>) {
+    let mut cfg = crate::config::Config::load();
+    cfg.keybinds.preset = preset.map(|p| p.config_name().to_string());
+    if let Err(e) = cfg.save() {
+        tracing::warn!("could not persist keybind preset: {e}");
+    }
+}
+
 /// Write (or replace) the managed block. Returns the backup path.
 pub fn install(preset: Preset, file: &Path, reload: bool) -> Result<Option<PathBuf>> {
     let existing = std::fs::read_to_string(file).unwrap_or_default();
@@ -165,9 +258,10 @@ pub enum KeybindsCommand {
         preset: Preset,
     },
     /// Append (or replace) the managed block in ~/.config/hypr/bindings.lua and reload Hyprland.
+    /// With no preset, uses the saved choice from config.toml, or Super+I.
     Install {
-        #[arg(value_enum, default_value_t = Preset::SuperI)]
-        preset: Preset,
+        #[arg(value_enum)]
+        preset: Option<Preset>,
         /// Install even if one of the keys is already bound to something else.
         #[arg(long)]
         force: bool,
@@ -187,6 +281,13 @@ pub enum KeybindsCommand {
     },
     /// Report whether the block is present and which preset keys are already taken.
     Status,
+    /// Re-apply the preset saved in config.toml if the managed block is missing or wrong.
+    Restore {
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        no_reload: bool,
+    },
 }
 
 pub fn run(cmd: KeybindsCommand) -> Result<()> {
@@ -195,12 +296,14 @@ pub fn run(cmd: KeybindsCommand) -> Result<()> {
             println!("{}", block(preset));
         }
         KeybindsCommand::Install { preset, force, file, no_reload } => {
+            let preset = preset.or_else(saved_preset).unwrap_or(Preset::SuperI);
             let file = file.unwrap_or_else(bindings_file);
             let taken = conflicts(preset);
             if !taken.is_empty() && !force {
                 bail!("already bound: {}\nRe-run with --force to override, or pick another preset.", taken.join(", "));
             }
             let backup = install(preset, &file, !no_reload)?;
+            remember_preset(Some(preset));
             println!("Installed {:?} bindings into {}", preset, file.display());
             if let Some(b) = backup {
                 println!("Backup: {}", b.display());
@@ -209,6 +312,7 @@ pub fn run(cmd: KeybindsCommand) -> Result<()> {
         KeybindsCommand::Remove { file, no_reload } => {
             let file = file.unwrap_or_else(bindings_file);
             if remove(&file, !no_reload)? {
+                remember_preset(None);
                 println!("Removed Omacapture bindings from {}", file.display());
             } else {
                 println!("No Omacapture bindings found in {}", file.display());
@@ -216,13 +320,34 @@ pub fn run(cmd: KeybindsCommand) -> Result<()> {
         }
         KeybindsCommand::Status => {
             let file = bindings_file();
-            println!("{}: {}", file.display(), if is_installed(&file) { "Omacapture block present" } else { "no Omacapture block" });
+            let detected = detect_preset(&file);
+            let saved = saved_preset();
+            println!(
+                "{}: {}",
+                file.display(),
+                match detected {
+                    Some(p) => format!("Omacapture block present ({})", p.config_name()),
+                    None => "no Omacapture block".into(),
+                }
+            );
+            println!("saved preset: {}", saved.map(|p| p.config_name().to_string()).unwrap_or_else(|| "none".into()));
             for preset in [Preset::SuperI, Preset::Print] {
                 let taken = conflicts(preset);
                 println!(
                     "{preset:?}: {}",
                     if taken.is_empty() { "keys free".to_string() } else { format!("taken by {}", taken.join(", ")) }
                 );
+            }
+        }
+        KeybindsCommand::Restore { file, no_reload } => {
+            let file = file.unwrap_or_else(bindings_file);
+            let preset = saved_preset();
+            if restore(&file, preset, !no_reload)? {
+                println!("Restored {} bindings into {}", preset.unwrap().config_name(), file.display());
+            } else if preset.is_none() {
+                println!("No saved keybind preset in config.toml");
+            } else {
+                println!("Already using {}; nothing to restore", preset.unwrap().config_name());
             }
         }
     }
@@ -251,6 +376,59 @@ mod tests {
         assert!(!text.contains(BEGIN));
         assert!(text.contains("chromium"));
         assert!(!remove(&file, false).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn scratch_bindings() -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "omacapture-kb-detect-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        (dir.clone(), dir.join("bindings.lua"))
+    }
+
+    #[test]
+    fn detect_preset_none_when_file_missing_or_unmanaged() {
+        let (dir, file) = scratch_bindings();
+        assert_eq!(detect_preset(&file), None);
+        std::fs::write(&file, "-- user stuff\n").unwrap();
+        assert_eq!(detect_preset(&file), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_preset_reads_print_and_super_i_blocks() {
+        let (dir, file) = scratch_bindings();
+        install(Preset::Print, &file, false).unwrap();
+        assert_eq!(detect_preset(&file), Some(Preset::Print));
+        install(Preset::SuperI, &file, false).unwrap();
+        assert_eq!(detect_preset(&file), Some(Preset::SuperI));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_is_noop_when_nothing_saved_or_already_matching() {
+        let (dir, file) = scratch_bindings();
+        std::fs::write(&file, "-- keep\n").unwrap();
+        assert!(!restore(&file, None, false).unwrap());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "-- keep\n");
+        install(Preset::Print, &file, false).unwrap();
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert!(!restore(&file, Some(Preset::Print), false).unwrap());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), after);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_rewrites_missing_or_wrong_block() {
+        let (dir, file) = scratch_bindings();
+        assert!(restore(&file, Some(Preset::Print), false).unwrap());
+        assert_eq!(detect_preset(&file), Some(Preset::Print));
+        install(Preset::SuperI, &file, false).unwrap();
+        assert!(restore(&file, Some(Preset::Print), false).unwrap());
+        assert_eq!(detect_preset(&file), Some(Preset::Print));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

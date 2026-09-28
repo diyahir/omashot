@@ -512,8 +512,8 @@ fn call_tool(name: &str, args: &Value) -> Result<Vec<Value>> {
             let touches = |section: &str, key: Option<&str>| {
                 patch.get(section).map(|v| key.map(|k| v.get(k).is_some()).unwrap_or(true)).unwrap_or(false)
             };
-            if touches("general", Some("save_folder")) || touches("mcp", None) {
-                bail!("general.save_folder and the [mcp] section define where agents may write; edit them in Preferences or config.toml, not over MCP");
+            if touches("general", Some("save_folder")) || touches("mcp", None) || touches("keybinds", None) {
+                bail!("general.save_folder, [mcp], and [keybinds] cannot be changed over MCP; edit them in Preferences or config.toml");
             }
             let mut cfg = crate::config::Config::load();
             cfg.merge_json(&patch).context("invalid setting")?;
