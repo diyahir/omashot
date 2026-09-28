@@ -68,11 +68,14 @@ omarchy-shell omacapture recheck
 Omarchy owns global shortcuts, and the plugin never edits your configuration on its own. Install bindings when you want them, from Preferences → Shortcuts or the CLI:
 
 ```sh
-omacapture keybinds status            # which preset keys are free
+omacapture keybinds status            # which preset keys are free, and which preset is saved
 omacapture keybinds install super-i   # Super+I area, Super+Shift+I annotate (press A in the overlay for windows)
 omacapture keybinds install print     # take over Print (unbinds Omarchy's screenshot key), Shift/Ctrl/Super+Ctrl variants
+omacapture keybinds restore           # re-apply the saved preset if Hyprland lost the block (also runs when the daemon starts)
 omacapture keybinds remove            # take the block out again
 ```
+
+The last successful install is stored as `[keybinds] preset` in `~/.config/omacapture/config.toml` (`print` or `super-i`) so a reboot restores Print instead of falling back to Super+I. Preferences → Shortcuts opens on that saved preset, not always Super+I.
 
 This appends a clearly marked block to `~/.config/hypr/bindings.lua` (after backing it up), refuses if a key is already bound unless you pass `--force`, and reloads Hyprland. Or paste it yourself:
 
@@ -178,6 +181,9 @@ copy_to_clipboard = true
 
 [mcp]
 allowed_write_dirs = []                   # extra folders agents may write images into
+
+[keybinds]
+preset = "print"                          # last installed Hyprland preset: print | super-i; omit if unused
 ```
 
 The widget setting `clickMode` lives in `~/.config/omarchy/shell.json` under the bar layout entry.
